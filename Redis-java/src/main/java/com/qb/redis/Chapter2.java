@@ -6,11 +6,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import javax.security.auth.callback.Callback;
+
 import org.junit.Test;
 
+import com.google.gson.Gson;
 import com.qb.utils.JedisUtil;
 
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Tuple;
 
 /**
  * 在这里对第二章节的内容进行分析
@@ -70,6 +74,69 @@ public class Chapter2 extends AbstractChapter {
 		thread.start();
 		Thread.sleep(1000);
 		cleanThread.quit();
+		Thread.sleep(2000);
+	}
+	
+	@Test
+	public void testCacheRows() throws InterruptedException {
+		out("\n------------------ testCacheRows -------------------");
+		out("first, Let's schedule caching of itemX every 5 seconds.");
+		conn.select(15);
+		scheduleRowCache(conn, "itemX", 5);
+		out("Our schedule looks like: ");
+		Set<Tuple> s = conn.zrangeWithScores("schedule:", 0, -1);
+		for(Tuple tuple : s) {
+			out(" " + tuple.getElement() + ", " + tuple.getScore());
+		}
+		assert s.size() != 0;
+		out("We'll start a caching thread that will cache the data...");
+		CacheRowsThread thread = new CacheRowsThread();
+		thread.start();
+		Thread.sleep(1000);
+		out("Our cached data looks like ");
+		String r = conn.get("inv:itemX");
+		out(r);
+		assert r != null;
+		out();
+		
+		out("We will check again in 5 seconds...");
+		Thread.sleep(5000);
+		out("Notice that the data has changed...");
+		String r2 = conn.get("inv:itemX");
+		out(r2);
+		out();
+		assert r2 != null;
+		assert !r.equals(r2);
+		
+		out("Let's force un-caching..");
+		scheduleRowCache(conn, "itemX", -1);
+		Thread.sleep(1000);
+		r = conn.get("inv:itemX");
+		out("The Cache was cleared? " + (r == null));
+		assert r == null;
+		
+		thread.quit();
+		Thread.sleep(2000);
+		if(thread.isAlive()) {
+			throw new RuntimeException("The database caching thread is still alive?");
+		}
+	}
+	
+	@Test
+	public void testCacheRequest() {
+		out("\n----------------------- testCacheRequest --------------------");
+		String token = UUID.randomUUID().toString();
+		Callback callback = new Callback() {
+			public String call(String request) {
+				return "content for" + request;
+			}
+		};
+		updateToken(conn, token, "username", "itemX");
+	}
+
+	private void scheduleRowCache(Jedis conn, String rowId, int delay) {
+		conn.zadd("delay:", delay, rowId);
+		conn.zadd("schedule:", System.currentTimeMillis() / 1000, rowId);
 	}
 
 	private void addToCart(Jedis conn, String session, String item, int count) {
@@ -92,6 +159,62 @@ public class Chapter2 extends AbstractChapter {
 			conn.zadd("viewed:" + token, timeStamp, item);
 			conn.zremrangeByRank("viewed:" + token, 0, -26);
 			conn.zincrby("viewed:", -1, item);
+		}
+	}
+	
+	public class CacheRowsThread extends Thread {
+		private Jedis conn;
+		private boolean quit;
+		public CacheRowsThread() {
+			this.conn = JedisUtil.getJedis("192.168.231.128", "xyyyhtl12");
+			conn.select(15);
+		}
+		
+		public void quit() {
+			quit = true;
+		}
+		
+		@Override
+		public void run() {
+			Gson gson = new Gson();
+			while(!quit) {
+				Set<Tuple> range = conn.zrangeWithScores("schedule:", 0, 0);
+				Tuple next = range.size() > 0 ? range.iterator().next() : null;
+				long now = System.currentTimeMillis() / 1000;
+				if(next == null || next.getScore() > now) {
+					try {
+						sleep(50);
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+					continue;
+				}
+				String rowId = next.getElement();
+				double delay = conn.zscore("delay:", rowId);
+				if(delay <= 0) {
+					conn.zrem("delay:", rowId);
+					conn.zrem("schedule:", rowId);
+					conn.del("inv:" + rowId);
+					continue;
+				} 
+				Inventory row = Inventory.get(rowId);
+				conn.zadd("schedule:", now + delay, rowId);
+				conn.set("inv:" + rowId, gson.toJson(row));
+			}
+		}
+	}
+	
+	public static class Inventory {
+		private String id;
+		private String data;
+		private long time;
+		private Inventory(String id) {
+			this.id = id;
+			this.data = "data to cache..";
+			this.time = System.currentTimeMillis() / 1000;
+		} 
+		public static Inventory get(String id) {
+			return new Inventory(id);
 		}
 	}
 	
