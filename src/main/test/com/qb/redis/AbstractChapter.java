@@ -9,7 +9,7 @@ public abstract class AbstractChapter {
 	
 	public AbstractChapter() {
 		if(this.conn == null)
-			this.conn = JedisUtil.getJedis("192.168.1.3", "xyyyhtl12");
+			this.conn = JedisUtil.getJedis("127.0.0.1", "xyyyhtl12");
 	}
 	
 	protected void out() {
